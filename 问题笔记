@@ -1,0 +1,7 @@
+
+正在基于多因子评分筛选推荐股票...
+合并所有候选股票，共 629 只。
+正在合并所属行业信息...
+[FATAL] 致命错误：数据分析流程意外终止。原因: "['KDJ买卖信号', '均线多头排列', 'BOLL波动性信号'] not in index"
+
+[SUCCESS] Excel 报告已保存至: C:\Users\y84189905\Downloads\CoreNews_Reports\主力研报筛选_20251116.xlsx
