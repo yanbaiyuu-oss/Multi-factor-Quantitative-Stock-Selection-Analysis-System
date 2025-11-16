@@ -30,7 +30,7 @@ class Config:
         self.CODE_ALIASES = {'代码': '股票代码', '证券代码': '股票代码', '股票代码': '股票代码'}
         # 别名已包含所有常见名称
         self.NAME_ALIASES = {'名称': '股票简称', '股票名称': '股票简称', '股票简称': '股票简称', '简称': '股票简称', '简': '股票简称', '证券名称': '股票简称'} 
-        # === 价格别名修复 v3：涵盖更多实时行情价格字段 ===
+        # === 价格别名修复 v5：涵盖更多实时行情价格字段 ===
         self.PRICE_ALIASES = {'最新价': '最新价', '现价': '最新价', '当前价格': '最新价', '今收盘': '最新价', '收盘': '最新价', '收盘价': '最新价'}
 
 
@@ -467,7 +467,7 @@ class StockAnalyzer:
         xstp_base = pd.merge(xstp_base, processed_df30[['股票代码', '30日均线最新价']], on='股票代码', how='left')
         xstp_base = pd.merge(xstp_base, processed_df60[['股票代码', '60日均线最新价']], on='股票代码', how='left')
 
-        # 4. 合并实时价格 (使用 spot_df 中的 '最新价')
+        # 4. 合并实时价格 (此处仍然按代码合并，以便于均线计算的准确性)
         xstp_base = pd.merge(xstp_base, spot_df[['股票代码', '最新价']], on='股票代码', how='left')
 
         # 5. 类型转换和过滤
@@ -498,7 +498,7 @@ class StockAnalyzer:
         return filtered_df.fillna('N/A')
 
     def _consolidate_data(self, processed_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """【已重构股票简称获取】合并所有数据源和信号，生成最终汇总报告，将技术指标作为独立列输出。"""
+        """【已按用户要求使用股票简称进行价格关联】合并所有数据源和信号，生成最终汇总报告。"""
         print("\n>>> 正在汇总所有数据和信号 (技术指标作为独立列)...")
 
         # 1. 提取所有有信号的股票代码作为基础
@@ -525,42 +525,72 @@ class StockAnalyzer:
         if not all_codes: return pd.DataFrame()
         final_df = pd.DataFrame(list(all_codes), columns=['股票代码'])
         
-        # V3 修复点 1A: 确保最终代码列表是字符串类型
+        # 强制代码列表为字符串类型
         final_df['股票代码'] = final_df['股票代码'].astype(str)
 
         # 2. 鲁棒地合并基础信息 (简称, 价格)
         spot_df = processed_data.get('spot_data_all', pd.DataFrame())
         report_df_base = processed_data.get('processed_main_report', pd.DataFrame())
         
-        # V3 修复点 1B: 确保实时行情代码列表是字符串类型
+        # 确保实时行情代码列表是字符串类型
         if '股票代码' in spot_df.columns:
              spot_df['股票代码'] = spot_df['股票代码'].astype(str)
 
-        # 2a. 构建名称源：从实时行情和研报数据中收集名称
+        # 2a. 构建名称源：从实时行情和研报数据中收集名称 (仍以代码为基础确保唯一性)
         name_source_spot = spot_df[['股票代码', '股票简称']].drop_duplicates(subset=['股票代码']) if '股票简称' in spot_df.columns else pd.DataFrame()
         name_source_report = report_df_base[['股票代码', '股票简称']].drop_duplicates(subset=['股票代码']) if '股票简称' in report_df_base.columns else pd.DataFrame()
 
         # 2b. 合并所有名称源：优先使用实时行情 (spot_df) 的名称
         all_names = pd.concat([name_source_spot, name_source_report]).drop_duplicates(subset=['股票代码'], keep='first')
         
-        # 2c. 合并名称和价格到最终报告
+        # 2c. 合并名称到最终报告 (按代码合并，保证基础表的简称是正确的)
         final_df = pd.merge(final_df, all_names, on='股票代码', how='left')
         
-        # 合并价格 (仅从实时行情获取)
-        price_source = spot_df[['股票代码', '最新价']].drop_duplicates(subset=['股票代码'])
-        final_df = pd.merge(final_df, price_source, on='股票代码', how='left')
+        # --- V5 价格获取和清洗增强：按用户要求使用 '股票简称' 进行关联 ---
         
-        # V3 修复点 2: 打印诊断信息
-        valid_prices_count = final_df['最新价'].notna().sum()
-        print(f"  - 实时行情数据 (最新价) 成功合并数量: {valid_prices_count} / {len(final_df)}")
+        # 1. 从实时行情数据中提取用于价格合并的列 (简称和最新价)
+        if '股票简称' not in spot_df.columns:
+            # 严重警告：如果实时行情数据中没有股票简称，则回退到使用股票代码。
+            print("[FATAL] 实时行情数据中缺少 '股票简称' 列，无法按要求按简称关联。回退到按代码关联。")
+            price_source_key = '股票代码'
+            price_source = spot_df[['股票代码', '最新价']].copy()
+        else:
+            price_source_key = '股票简称'
+            price_source = spot_df[['股票简称', '最新价']].copy()
+
+            # 2. 严格筛选：对价格数据进行数值转换，并只保留非空、非零的价格
+            price_source['最新价'] = pd.to_numeric(price_source['最新价'], errors='coerce')
+            price_source = price_source[
+                (price_source['最新价'].notna()) & 
+                (price_source['最新价'] > 0)
+            ].copy()
+
+            # 3. 关键修改点：根据用户要求，按 "股票简称" 进行去重（处理非唯一性问题）
+            price_source = price_source.drop_duplicates(subset=[price_source_key], keep='first')
         
-        # 2d. 填充空值
+        # 4. 移除旧的 '最新价' 列 (来自XSTP或之前的合并)
+        final_df.drop(columns=['最新价'], errors='ignore', inplace=True) 
+
+        # 5. 合并价格 (使用 '股票简称' 或回退键)
+        if price_source_key in final_df.columns:
+             # 确保合并键是字符串类型
+             final_df[price_source_key] = final_df[price_source_key].astype(str)
+             price_source[price_source_key] = price_source[price_source_key].astype(str)
+             
+             final_df = pd.merge(final_df, price_source, on=price_source_key, how='left')
+        
+        # 打印诊断信息
+        valid_prices_count = final_df['最新价'].notna().sum() if '最新价' in final_df.columns else 0
+        print(f"  - 实时行情数据 (最新价) 成功通过 '{price_source_key}' 关联的有效价格数量: {valid_prices_count} / {len(final_df)}")
+        
+        # 6. 填充空值
         final_df['股票简称'] = final_df['股票简称'].fillna('N/A')
-        # 将价格的 NaN 填充为 'N/A' (如果仍然是 NaN，说明源数据没有有效价格)
+        # 将价格的 NaN 填充为 'N/A'
         final_df['最新价'] = final_df['最新价'].fillna('N/A')
+        # --- V5 价格获取和清洗增强结束 ---
 
 
-        # 3. 合并信号和细节
+        # 3. 合并信号和细节 (以下合并仍然使用股票代码，因为它更可靠)
         # A. 主力研报信号 (使用买入次数)
         report_df = processed_data['processed_main_report'][['股票代码', '机构投资评级(近六个月)-买入']]
         report_df.rename(columns={'机构投资评级(近六个月)-买入': '研报买入次数'}, inplace=True)
