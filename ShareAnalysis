@@ -9,6 +9,7 @@ from typing import Callable, Dict, Any, List
 import pandas_ta as ta
 import numpy as np
 import xlsxwriter
+import traceback # 新增：用于捕获并打印完整的错误信息
 
 # 忽略 pandas 的 SettingWithCopyWarning
 warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
@@ -28,10 +29,8 @@ class Config:
         self.DATA_FETCH_DELAY = 5
         self.MAX_WORKERS = 15
         self.CODE_ALIASES = {'代码': '股票代码', '证券代码': '股票代码', '股票代码': '股票代码'}
-        # 别名已包含所有常见名称
         self.NAME_ALIASES = {'名称': '股票简称', '股票名称': '股票简称', '股票简称': '股票简称', '简称': '股票简称',
                              '简': '股票简称', '证券名称': '股票简称'}
-        # === 价格别名修复 v5：涵盖更多实时行情价格字段 ===
         self.PRICE_ALIASES = {'最新价': '最新价', '现价': '最新价', '当前价格': '最新价', '今收盘': '最新价',
                               '收盘': '最新价', '收盘价': '最新价'}
 
@@ -54,7 +53,7 @@ def format_stock_code(code: str) -> str:
 class StockAnalyzer:
     """
     股票数据获取、处理、分析和报告生成的核心类。
-    **已改造：MACD 信号区分 '零轴上金叉' 和 '零轴下金叉'。**
+    已改造：MACD 信号区分 '零轴上金叉' 和 '零轴下金叉'。
     """
 
     def __init__(self):
@@ -93,8 +92,14 @@ class StockAnalyzer:
         except Exception as e:
             print(f"[ERROR] 保存数据到缓存 {os.path.basename(file_path)} 失败: {e}")
 
+    # ==========================================================================
+    # [改进] _safe_ak_fetch：增强错误诊断能力
+    # ==========================================================================
     def _safe_ak_fetch(self, fetch_func: Callable, file_base_name: str, **kwargs: Any) -> pd.DataFrame:
-
+        """
+        带重试和缓存的 Akshare 数据获取函数。
+        V11 改进：增强异常时的诊断信息。
+        """
         # 1. 尝试从【清洗后的缓存】加载数据
         cleaned_file_path = self._get_file_path(file_base_name, cleaned=True)
         cached_df = self._load_data_from_cache(cleaned_file_path)
@@ -113,7 +118,11 @@ class StockAnalyzer:
                     print(f"[WARN] 数据返回为空或无效: {file_base_name}，重试中。")
                     time.sleep(self.config.DATA_FETCH_DELAY)
             except Exception as e:
+                # V11 改进：打印完整的错误追踪信息，有助于诊断 Akshare 内部错误
                 print(f"[ERROR] 获取 {file_base_name} 时出错: {e}，将在 {self.config.DATA_FETCH_DELAY} 秒后重试。")
+                print("--- 完整错误追踪信息 ---")
+                traceback.print_exc()
+                print("----------------------")
                 time.sleep(self.config.DATA_FETCH_DELAY)
 
         if df.empty:
@@ -173,12 +182,14 @@ class StockAnalyzer:
             'spot_data_all': self._safe_ak_fetch(ak.stock_zh_a_spot, "A股实时行情"),
             'main_report_raw': self._safe_ak_fetch(ak.stock_profit_forecast_em, "主力研报盈利预测"),
             'financial_abstract_raw': self._safe_ak_fetch(ak.stock_financial_abstract, "财务摘要数据"),
+            # --- 资金流向：此处是引起错误的 API 调用，现已增加错误诊断 ---
             'market_fund_flow_raw': self._safe_ak_fetch(ak.stock_fund_flow_individual, "5日市场资金流向",
                                                         symbol="5日排行"),
             'market_fund_flow_raw_10': self._safe_ak_fetch(ak.stock_fund_flow_individual, "10日市场资金流向",
                                                            symbol="10日排行"),
             'market_fund_flow_raw_20': self._safe_ak_fetch(ak.stock_fund_flow_individual, "20日市场资金流向",
                                                            symbol="20日排行"),
+            # ------------------------------------------------------------------
             'strong_stocks_raw': self._safe_ak_fetch(ak.stock_zt_pool_strong_em, "强势股池",
                                                      date=datetime.now().strftime('%Y%m%d')),
             'consecutive_rise_raw': self._safe_ak_fetch(ak.stock_rank_lxsz_ths, "连续上涨"),
@@ -665,7 +676,7 @@ class StockAnalyzer:
         data_sources = [
             processed_data.get('processed_main_report'),
             processed_data.get('processed_xstp_df'),
-            processed_data.get('market_fund_flow_raw'),
+            processed_data.get('market_fund_flow_raw', pd.DataFrame()),
             processed_data.get('strong_stocks_raw'),
             processed_data.get('consecutive_rise_raw'),
             processed_data.get('ljqs_raw'),
@@ -987,21 +998,21 @@ class StockAnalyzer:
                 '主力研报筛选': processed_data['processed_main_report'],
                 '均线多头排列': processed_xstp_df,  # 使用处理后且过滤后的数据
                 '实时行情': spot_df,  # 使用清洗后的数据
-                '5日市场资金流向': raw_data['market_fund_flow_raw'],
-                '10日市场资金流向': raw_data['market_fund_flow_raw_10'],
-                '20日市场资金流向': raw_data['market_fund_flow_raw_20'],
-                '强势股池': raw_data['strong_stocks_raw'],
-                '连续上涨': raw_data['consecutive_rise_raw'],
-                '量价齐升': raw_data['ljqs_raw'],
-                '持续放量': raw_data['cxfl_raw'],
+                '5日市场资金流向': raw_data.get('market_fund_flow_raw', pd.DataFrame()),
+                '10日市场资金流向': raw_data.get('market_fund_flow_raw_10', pd.DataFrame()),
+                '20日市场资金流向': raw_data.get('market_fund_flow_raw_20', pd.DataFrame()),
+                '强势股池': raw_data.get('strong_stocks_raw', pd.DataFrame()),
+                '连续上涨': raw_data.get('consecutive_rise_raw', pd.DataFrame()),
+                '量价齐升': raw_data.get('ljqs_raw', pd.DataFrame()),
+                '持续放量': raw_data.get('cxfl_raw', pd.DataFrame()),
                 'MACD_12269金叉': ta_signals.get('MACD_12269', pd.DataFrame()),  # 增加标准周期表格
                 'MACD_6135金叉': ta_signals.get('MACD_6135', pd.DataFrame()),  # 增加加速周期表格
                 'KDJ超卖金叉': ta_signals.get('KDJ', pd.DataFrame()),
                 'CCI专业状态': ta_signals.get('CCI', pd.DataFrame()),
                 'RSI超卖': ta_signals.get('RSI', pd.DataFrame()),
                 'BOLL低波': ta_signals.get('BOLL', pd.DataFrame()),
-                '前十板块成分股': raw_data['top_industry_cons_df'],
-                '行业板块信息': raw_data['industry_board_df']
+                '前十板块成分股': raw_data.get('top_industry_cons_df', pd.DataFrame()),
+                '行业板块信息': raw_data.get('industry_board_df', pd.DataFrame())
             }
             
             self._generate_excel_report(sheets_data)
@@ -1010,6 +1021,7 @@ class StockAnalyzer:
 
         except Exception as e:
             print(f"\n[FATAL] 主程序运行发生致命错误: {e}")
+            traceback.print_exc()
             
 # ==============================================================================
 # 示例运行
